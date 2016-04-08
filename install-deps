@@ -1,0 +1,25 @@
+#!/bin/bash
+
+set -eux
+
+VERSION="2.0.0"
+
+cd "$(dirname "$0")"
+
+cleanup() {
+  rm -f "softhsm-$VERSION.tar.gz"
+  rm -rf "softhsm-$VERSION"
+}
+trap cleanup EXIT
+
+wget "https://dist.opendnssec.org/source/softhsm-$VERSION.tar.gz"
+shasum -a 256 -c softhsm.shasum
+
+tar -xzf "softhsm-$VERSION.tar.gz"
+prefix="$(pwd)/softhsm"
+
+(
+  cd "softhsm-$VERSION"
+  ./configure --prefix "$prefix"
+  make -j4 install
+)
