@@ -146,19 +146,22 @@ func (s *Slot) findKey(search []*pkcs11.Attribute) (*Key, error) {
 		return nil, err
 	}
 	var pub, priv pkcs11.ObjectHandle
+	var pubKeyType string
 	if c0 == "public" && c1 == "private" {
 		pub = objs[0]
 		priv = objs[1]
+		pubKeyType = t0
 	} else if c0 == "private" && c1 == "public" {
 		pub = objs[1]
 		priv = objs[0]
+		pubKeyType = t1
 	} else {
 		return nil, fmt.Errorf("pkcs11: got keys of class %s and %s", c0, c1)
 	}
 	if strings.TrimPrefix(t0, "x509:") != strings.TrimPrefix(t1, "x509:") {
 		return nil, fmt.Errorf("pkcs11: got keys of type %s and %s", t0, t1)
 	}
-	pubkey, err := publicKey(obj{s.module.ctx, h, pub}, t0)
+	pubkey, err := publicKey(obj{s.module.ctx, h, pub}, pubKeyType)
 	if err != nil {
 		return nil, err
 	}
