@@ -9,7 +9,6 @@ import (
 	"encoding/asn1"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"math/big"
 	"strings"
 
@@ -175,6 +174,10 @@ func describeKey(obj obj) (c, t string, err error) {
 	attrs, err := obj.ctx.GetAttributeValue(obj.h, obj.o, []*pkcs11.Attribute{
 		&pkcs11.Attribute{Type: pkcs11.CKA_CLASS},
 	})
+	if err != nil {
+		err = fmt.Errorf("Error reading CKA_CLASS: %x", err)
+		return
+	}
 	switch btoi(attrs[0].Value) {
 	case pkcs11.CKO_PUBLIC_KEY:
 		c = "public"
@@ -182,15 +185,26 @@ func describeKey(obj obj) (c, t string, err error) {
 		c = "private"
 	case pkcs11.CKO_CERTIFICATE:
 		c = "public"
-		certAttrs, cerr := obj.ctx.GetAttributeValue(obj.h, obj.o, []*pkcs11.Attribute{
+		certType, cerr := obj.ctx.GetAttributeValue(obj.h, obj.o, []*pkcs11.Attribute{
 			&pkcs11.Attribute{Type: pkcs11.CKA_CERTIFICATE_TYPE},
-			&pkcs11.Attribute{Type: pkcs11.CKA_VALUE},
 		})
-		switch btoi(certAttrs[0].Value) {
+		if cerr != nil {
+			err = fmt.Errorf("Error reading CKA_CERTIFICATE_TYPE: %x", cerr)
+			return
+		}
+		switch btoi(certType[0].Value) {
 		case pkcs11.CKC_X_509:
-			cert, cerr := x509.ParseCertificate(certAttrs[1].Value)
+			certValue, cerr := obj.ctx.GetAttributeValue(obj.h, obj.o, []*pkcs11.Attribute{
+				&pkcs11.Attribute{Type: pkcs11.CKA_VALUE},
+			})
 			if cerr != nil {
-				log.Fatal(fmt.Sprintf("Error parsing x509 certificate: %x", cerr))
+				err = fmt.Errorf("Error reading CKA_VALUE: %x", cerr)
+				return
+			}
+			cert, cerr := x509.ParseCertificate(certValue[0].Value)
+			if cerr != nil {
+				err = fmt.Errorf("Error parsing x509 certificate: %x", cerr)
+				return
 			}
 			switch cert.PublicKeyAlgorithm {
 			case x509.RSA:
@@ -203,7 +217,7 @@ func describeKey(obj obj) (c, t string, err error) {
 				cerr = fmt.Errorf("pkcs11: unknown key type %x", cert.PublicKeyAlgorithm)
 			}
 		default:
-			cerr = fmt.Errorf("pkcs11: unknown cert type %x", btoi(certAttrs[0].Value))
+			cerr = fmt.Errorf("pkcs11: unknown cert type %x", btoi(certType[0].Value))
 		}
 		err = cerr
 		return
