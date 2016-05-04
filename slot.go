@@ -9,9 +9,7 @@ import (
 	"encoding/asn1"
 	"encoding/hex"
 	"fmt"
-	"log"
 	"math/big"
-	"strings"
 
 	"github.com/miekg/pkcs11"
 )
@@ -78,11 +76,11 @@ func (s *Slot) Key(id string) (*Key, error) {
 	})
 }
 
-// GetIDByLabel returns a hex-encoded ID for the given label
-func (s *Slot) GetIDByLabel(label string) (string, error) {
+// KeyFromLabel returns a Key given a human-readable label
+func (s *Slot) KeyFromLabel(label string) (*Key, error) {
 	h, err := s.alloc()
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	defer s.release(h)
 
@@ -91,28 +89,30 @@ func (s *Slot) GetIDByLabel(label string) (string, error) {
 	}
 
 	if err := s.module.ctx.FindObjectsInit(h, search); err != nil {
-		return "", err
+		return nil, err
 	}
 	objs, _, err := s.module.ctx.FindObjects(h, 1)
 	if err != nil {
-		return "", err
+		return nil, err
 	}
 	if len(objs) == 0 {
-		return "", fmt.Errorf("pkcs11: could not find an object with label %s", label)
+		return nil, fmt.Errorf("pkcs11: could not find an object with label %s", label)
 	}
 
 	if err := s.module.ctx.FindObjectsFinal(h); err != nil {
-		return "", err
+		return nil, err
 	}
 
 	attrs, err := s.module.ctx.GetAttributeValue(h, objs[0], []*pkcs11.Attribute{
 		&pkcs11.Attribute{Type: pkcs11.CKA_ID},
 	})
 	if err != nil {
-		return "", err
+		return nil, fmt.Errorf("pkcs11: could not find an id for label %s: %v", label, err)
 	}
 
-	return hex.EncodeToString(attrs[0].Value), nil
+	return s.findKey([]*pkcs11.Attribute{
+		pkcs11.NewAttribute(pkcs11.CKA_ID, attrs[0].Value),
+	})
 }
 
 func (s *Slot) findKey(search []*pkcs11.Attribute) (*Key, error) {
@@ -138,28 +138,37 @@ func (s *Slot) findKey(search []*pkcs11.Attribute) (*Key, error) {
 		return nil, err
 	}
 
-	c0, t0, err := describeKey(obj{s.module.ctx, h, objs[0]})
-	if err != nil {
-		return nil, err
-	}
-	c1, t1, err := describeKey(obj{s.module.ctx, h, objs[1]})
-	if err != nil {
-		return nil, err
-	}
 	var pub, priv pkcs11.ObjectHandle
-	if c0 == "public" && c1 == "private" {
-		pub = objs[0]
-		priv = objs[1]
-	} else if c0 == "private" && c1 == "public" {
-		pub = objs[1]
-		priv = objs[0]
-	} else {
-		return nil, fmt.Errorf("pkcs11: got keys of class %s and %s", c0, c1)
+	var keyType, pubClass string
+
+	for i := 0; i < 2; i++ {
+		c, t, err := describeKey(obj{s.module.ctx, h, objs[i]})
+		if keyType == "" {
+			keyType = t
+		} else if keyType != t {
+			return nil, fmt.Errorf("pkcs11: got keys of type %s and %s", keyType, t)
+		}
+		if err != nil {
+			return nil, err
+		}
+		switch c {
+		case "public", "certificate":
+			if pub != 0 {
+				return nil, fmt.Errorf("pkcs11: got two keys of class \"certificate\" or \"public\"")
+			}
+			pub = objs[i]
+			pubClass = c
+		case "private":
+			if priv != 0 {
+				return nil, fmt.Errorf("pkcs11: got two keys of class \"private\"")
+			}
+			priv = objs[i]
+		default:
+			return nil, fmt.Errorf("pkcs11: got an unexpected key class: %s", c)
+		}
 	}
-	if strings.TrimPrefix(t0, "x509:") != strings.TrimPrefix(t1, "x509:") {
-		return nil, fmt.Errorf("pkcs11: got keys of type %s and %s", t0, t1)
-	}
-	pubkey, err := publicKey(obj{s.module.ctx, h, pub}, t0)
+
+	pubkey, err := publicKey(obj{s.module.ctx, h, pub}, pubClass, keyType)
 	if err != nil {
 		return nil, err
 	}
@@ -169,6 +178,31 @@ func (s *Slot) findKey(search []*pkcs11.Attribute) (*Key, error) {
 		private:   priv,
 		publicKey: pubkey,
 	}, nil
+}
+
+func describeCert(obj obj) (t string, err error) {
+	certAttrs, err := obj.ctx.GetAttributeValue(obj.h, obj.o, []*pkcs11.Attribute{
+		&pkcs11.Attribute{Type: pkcs11.CKA_CERTIFICATE_TYPE},
+		&pkcs11.Attribute{Type: pkcs11.CKA_VALUE},
+	})
+	if btoi(certAttrs[0].Value) != pkcs11.CKC_X_509 {
+		return "", fmt.Errorf("pkcs11: unknown cert type %x", btoi(certAttrs[0].Value))
+	}
+	cert, err := x509.ParseCertificate(certAttrs[1].Value)
+	if err != nil {
+		return "", fmt.Errorf("pkcs11: while parsing x509 certificate: %v", err)
+	}
+	switch cert.PublicKeyAlgorithm {
+	case x509.RSA:
+		t = "rsa"
+	case x509.ECDSA:
+		t = "ecdsa"
+	case x509.DSA:
+		err = fmt.Errorf("pkcs11: DSA keys are not supported")
+	default:
+		err = fmt.Errorf("pkcs11: unknown key type %x", cert.PublicKeyAlgorithm)
+	}
+	return
 }
 
 func describeKey(obj obj) (c, t string, err error) {
@@ -181,31 +215,8 @@ func describeKey(obj obj) (c, t string, err error) {
 	case pkcs11.CKO_PRIVATE_KEY:
 		c = "private"
 	case pkcs11.CKO_CERTIFICATE:
-		c = "public"
-		certAttrs, cerr := obj.ctx.GetAttributeValue(obj.h, obj.o, []*pkcs11.Attribute{
-			&pkcs11.Attribute{Type: pkcs11.CKA_CERTIFICATE_TYPE},
-			&pkcs11.Attribute{Type: pkcs11.CKA_VALUE},
-		})
-		switch btoi(certAttrs[0].Value) {
-		case pkcs11.CKC_X_509:
-			cert, cerr := x509.ParseCertificate(certAttrs[1].Value)
-			if cerr != nil {
-				log.Fatal(fmt.Sprintf("Error parsing x509 certificate: %x", cerr))
-			}
-			switch cert.PublicKeyAlgorithm {
-			case x509.RSA:
-				t = "x509:rsa"
-			case x509.ECDSA:
-				t = "x509:ecdsa"
-			case x509.DSA:
-				cerr = fmt.Errorf("pkcs11: DSA keys are not supported")
-			default:
-				cerr = fmt.Errorf("pkcs11: unknown key type %x", cert.PublicKeyAlgorithm)
-			}
-		default:
-			cerr = fmt.Errorf("pkcs11: unknown cert type %x", btoi(certAttrs[0].Value))
-		}
-		err = cerr
+		c = "certificate"
+		t, err = describeCert(obj)
 		return
 	default:
 		err = fmt.Errorf("pkcs11: unknown key class %x", btoi(attrs[0].Value))
@@ -239,8 +250,8 @@ var (
 	oidNamedCurveP521 = asn1.ObjectIdentifier{1, 3, 132, 0, 35}
 )
 
-func publicKey(obj obj, t string) (crypto.PublicKey, error) {
-	if strings.HasPrefix(t, "x509:") {
+func publicKey(obj obj, c, t string) (crypto.PublicKey, error) {
+	if c == "certificate" {
 		attrs, err := obj.ctx.GetAttributeValue(obj.h, obj.o, []*pkcs11.Attribute{
 			&pkcs11.Attribute{Type: pkcs11.CKA_VALUE},
 		})
