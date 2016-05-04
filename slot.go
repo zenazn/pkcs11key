@@ -209,6 +209,10 @@ func describeKey(obj obj) (c, t string, err error) {
 	attrs, err := obj.ctx.GetAttributeValue(obj.h, obj.o, []*pkcs11.Attribute{
 		&pkcs11.Attribute{Type: pkcs11.CKA_CLASS},
 	})
+	if err != nil {
+		err = fmt.Errorf("pkcs11: reading CKA_CLASS: %v", err)
+		return
+	}
 	switch btoi(attrs[0].Value) {
 	case pkcs11.CKO_PUBLIC_KEY:
 		c = "public"
