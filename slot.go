@@ -260,9 +260,12 @@ func publicKey(obj obj, c, t string) (crypto.PublicKey, error) {
 			&pkcs11.Attribute{Type: pkcs11.CKA_VALUE},
 		})
 		if err != nil {
-			return nil, err
+			return nil, fmt.Errorf("reading value of certificate from pkcs11: %v", err)
 		}
 		cert, err := x509.ParseCertificate(attrs[0].Value)
+		if err != nil {
+			return nil, fmt.Errorf("parsing x509 certificate from pkcs11 value: %v", err)
+		}
 		return cert.PublicKey, nil
 	}
 	switch t {
